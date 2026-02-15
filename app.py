@@ -55,7 +55,6 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     prompt = """
     Dress the model in the provided clothing item.
-    Keep the model's pose and face unchanged.
     Make the clothing realistic, properly fitted, and natural.
     Maintain realistic lighting and shadows.
     """
