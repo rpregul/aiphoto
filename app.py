@@ -1,16 +1,14 @@
 import os
 import io
+import requests
 import traceback
 from google import genai
-from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # --- КОНФИГУРАЦИЯ ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
-# Твой прокси (обязательно оставь его, иначе будет GEO-блок)
 PROXY_URL = "aiphoto.plotnikov-csh.workers.dev" 
 
 client = genai.Client(
@@ -21,66 +19,61 @@ client = genai.Client(
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧪 Тестируем Gemini 2.5 Flash Lite Preview!")
+    await update.message.reply_text("✅ Бот запущен! Пришли фото одежды, и ИИ создаст образ на модели.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        file_path = f"garment_{update.effective_chat.id}.jpg"
-        await file.download_to_drive(file_path)
-        user_sessions[update.effective_chat.id] = file_path
-        
-        keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
-                    [InlineKeyboardButton("Мужская модель", callback_data="male")]]
-        await update.message.reply_text("Выбери пол:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except:
-        await update.message.reply_text("Ошибка загрузки.")
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    file_path = f"garment_{update.effective_chat.id}.jpg"
+    await file.download_to_drive(file_path)
+    user_sessions[update.effective_chat.id] = file_path
+    
+    keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
+                [InlineKeyboardButton("Мужская модель", callback_data="male")]]
+    await update.message.reply_text("Выбери пол модели:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
-    await query.edit_message_text("⏳ Попытка генерации через Flash-Lite...")
+    gender = "female" if query.data == "female" else "male"
+    
+    await query.edit_message_text("⏳ Анализирую одежду и генерирую образ...")
 
     try:
-        garment_path = user_sessions.get(chat_id)
-        if not garment_path: return
+        path = user_sessions.get(chat_id)
+        if not path: return
 
-        with open(garment_path, "rb") as f:
-            image_bytes = f.read()
+        with open(path, "rb") as f:
+            img_bytes = f.read()
 
-        gender = "female" if query.data == "female" else "male"
-        prompt = f"Return a generated image of a {gender} model wearing this outfit."
-
-        # Пробуем Lite-версию
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite-preview-09-2025", 
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(text=prompt),
-            ],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"]
-            )
+        # 1. Gemini анализирует фото (это бесплатно и работает!)
+        analysis_prompt = (
+            f"Describe the clothing in this image in detail. "
+            f"Then create a high-fashion photography prompt for a {gender} model wearing this exact clothing. "
+            f"Return ONLY the prompt in English, no talk."
         )
-
-        image_data = None
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    image_data = part.inline_data.data
-                    break
         
-        if image_data:
-            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data), caption="Сработало на Lite! ✨")
+        response = client.models.generate_content(
+            model="gemini-2.0-flash", # Используем стабильную 2.0
+            contents=[{"inline_data": {"data": img_bytes, "mime_type": "image/jpeg"}}, analysis_prompt]
+        )
+        
+        ai_prompt = response.text if response.text else f"A {gender} model wearing stylish clothes"
+
+        # 2. Генерируем саму картинку через бесплатный Pollinations
+        image_gen_url = f"https://image.pollinations.ai/prompt/{ai_prompt.replace(' ', '%20')}?width=1024&height=1280&nologo=true"
+        
+        img_res = requests.get(image_gen_url)
+        
+        if img_res.status_code == 200:
+            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(img_res.content), caption="✨ Ваш образ готов!")
         else:
-            text_resp = response.candidates[0].content.parts[0].text if response.candidates else "No output"
-            await context.bot.send_message(chat_id, f"Lite вернула текст вместо фото: {text_resp[:150]}")
+            await context.bot.send_message(chat_id, "Ошибка отрисовки. Попробуйте еще раз.")
 
     except Exception as e:
         print(traceback.format_exc())
-        await context.bot.send_message(chat_id, f"Ошибка Lite: {str(e)[:100]}")
+        await context.bot.send_message(chat_id, f"Ошибка: {str(e)[:100]}")
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
             os.remove(user_sessions[chat_id])
