@@ -2,7 +2,6 @@ import os
 import io
 import traceback
 from google import genai
-from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -34,65 +33,55 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
-    await query.edit_message_text("⏳ Генерирую (Nano Banana 2.0)...")
+    await query.edit_message_text("⏳ Генерирую финальное изображение...")
 
     try:
         garment_path = user_sessions.get(chat_id)
         if not garment_path: return
 
+        # Читаем фото для использования в качестве контекста (если модель поддерживает)
         with open(garment_path, "rb") as f:
             image_bytes = f.read()
 
-        model_type = "female fashion model" if query.data == "female" else "male fashion model"
-        prompt = f"High-end fashion photography. {model_type} wearing the clothing from the reference image. Studio lighting, 8k."
-
-        # Используем Gemini 2.0 Flash — у нее больше лимитов в Free Tier
-        contents = [
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    types.Part.from_text(text=prompt),
-                ],
-            ),
-        ]
+        gender_text = "female fashion model" if query.data == "female" else "male fashion model"
         
-        # Конфиг для генерации именно КАРТИНКИ
-        generate_content_config = types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
+        # Максимально простой и понятный промпт для Imagen
+        prompt_text = f"Full body professional photography of a {gender_text} wearing the specific style of garment from the provided reference. High fashion studio look, 8k, photorealistic."
+
+        # Используем метод generate_images, так как Flash не отдал IMAGE через stream
+        # Мы используем 'imagen-3.0-generate-001' - это самая стабильная точка входа для картинок
+        response = client.models.generate_images(
+            model='imagen-3.0-generate-001',
+            prompt=prompt_text,
+            config={
+                'number_of_images': 1,
+                'aspect_ratio': "3:4"
+                # Мы УБРАЛИ все спорные параметры, чтобы не было ошибок валидации
+            }
         )
 
-        image_data = None
-        # Потоковое получение результата
-        for chunk in client.models.generate_content_stream(
-            model="gemini-2.0-flash", 
-            contents=contents,
-            config=generate_content_config,
-        ):
-            if chunk.parts:
-                for part in chunk.parts:
-                    if part.inline_data:
-                        image_data = part.inline_data.data
-                        break
-        
-        if image_data:
-            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data))
+        if response and response.generated_images:
+            generated_img = response.generated_images[0]
+            # В новых версиях SDK байты лежат здесь:
+            img_payload = generated_img.image.image_bytes 
+            
+            await context.bot.send_photo(
+                chat_id=chat_id, 
+                photo=io.BytesIO(img_payload),
+                caption="Готово! ✨"
+            )
         else:
-            await context.bot.send_message(chat_id, "ИИ не выдал картинку. Попробуй другой ракурс.")
+            await context.bot.send_message(chat_id, "ИИ не смог сгенерировать изображение. Попробуй другое фото.")
 
     except Exception as e:
-        err_raw = str(e)
-        if "429" in err_raw:
-            await context.bot.send_message(chat_id, "Превышен лимит запросов Google. Подождите 1 минуту.")
-        else:
-            print(traceback.format_exc())
-            await context.bot.send_message(chat_id, "Ошибка генерации.")
+        print(f"Критическая ошибка:\n{traceback.format_exc()}")
+        # Если ОПЯТЬ 404, бот скажет об этом в логах
+        await context.bot.send_message(chat_id, "Техническая ошибка на стороне API Google.")
     
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
             os.remove(user_sessions[chat_id])
 
-# --- ЗАПУСК ---
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
