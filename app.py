@@ -10,10 +10,11 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# СЮДА ВСТАВЬ СВОЙ АДРЕС ИЗ CLOUDFLARE (БЕЗ https:// и БЕЗ слэша в конце)
+# ВСТАВЬ СЮДА СВОЙ АДРЕС БЕЗ https://
+# Пример: PROXY_URL = "my-proxy.account.workers.dev"
 PROXY_URL = "aiphoto.plotnikov-csh.workers.dev" 
 
-# Инициализируем клиент с подменой базового URL
+# Инициализация клиента с прокси (как в статье с Хабра)
 client = genai.Client(
     api_key=GOOGLE_API_KEY,
     http_options={'api_version': 'v1beta', 'base_url': f"https://{PROXY_URL}"}
@@ -21,13 +22,29 @@ client = genai.Client(
 
 user_sessions = {}
 
-# ... (функции start и handle_photo остаются такими же, как были) ...
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Бот запущен через Cloudflare Proxy! Пришли фото одежды.")
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        file_path = f"garment_{update.effective_chat.id}.jpg"
+        await file.download_to_drive(file_path)
+        user_sessions[update.effective_chat.id] = file_path
+
+        keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
+                    [InlineKeyboardButton("Мужская модель", callback_data="male")]]
+        await update.message.reply_text("Выбери пол:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception:
+        await update.message.reply_text("Ошибка при получении фото.")
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
-    await query.edit_message_text("⏳ Генерирую через Cloudflare Proxy...")
+    
+    await query.edit_message_text("⏳ Генерирую через прокси...")
 
     try:
         garment_path = user_sessions.get(chat_id)
@@ -37,9 +54,9 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_bytes = f.read()
 
         gender = "female" if query.data == "female" else "male"
-        prompt = f"A professional studio photo of a {gender} model wearing the exact clothing from this image."
+        prompt = f"Professional studio photo of a {gender} model wearing the clothing from this image."
 
-        # Используем твою рабочую модель из студии
+        # ТВОЙ КОД ИЗ СТУДИИ
         response = client.models.generate_content(
             model="gemini-2.5-flash-image",
             contents=[
@@ -59,15 +76,24 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
         
         if image_data:
-            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data), caption="Готово через прокси! ✨")
+            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data), caption="Готово! ✨")
         else:
-            await context.bot.send_message(chat_id, "Модель не прислала картинку. Проверь логи воркера.")
+            await context.bot.send_message(chat_id, "Картинка не пришла. Проверь Cloudflare Logs.")
 
     except Exception as e:
-        print(traceback.format_exc())
-        await context.bot.send_message(chat_id, f"Ошибка через прокси: {str(e)[:100]}")
+        print(f"Критическая ошибка:\n{traceback.format_exc()}")
+        await context.bot.send_message(chat_id, f"Ошибка прокси: {str(e)[:100]}")
+    
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
             os.remove(user_sessions[chat_id])
 
-# ... (запуск бота как раньше) ...
+# --- ЗАПУСК ---
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CallbackQueryHandler(handle_choice))
+
+    print("Бот запускается...")
+    app.run_polling(drop_pending_updates=True)
