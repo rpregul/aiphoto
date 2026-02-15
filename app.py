@@ -1,5 +1,6 @@
 import os
 import io
+import mimetypes
 import traceback
 from google import genai
 from google.genai import types
@@ -14,7 +15,7 @@ client = genai.Client(api_key=GOOGLE_API_KEY)
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Пробую запустить генерацию через Gemini 3 Flash (Free Tier).")
+    await update.message.reply_text("👋 Бот на связи! Пришли фото одежды.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -23,7 +24,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = f"garment_{update.effective_chat.id}.jpg"
         await file.download_to_drive(file_path)
         user_sessions[update.effective_chat.id] = file_path
-        
+
         keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
                     [InlineKeyboardButton("Мужская модель", callback_data="male")]]
         await update.message.reply_text("Выбери пол:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -34,7 +35,7 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
-    await query.edit_message_text("⏳ Пытаюсь сгенерировать через Gemini 3 Flash...")
+    await query.edit_message_text("⏳ Генерирую (использую твой метод из Studio)...")
 
     try:
         garment_path = user_sessions.get(chat_id)
@@ -44,36 +45,52 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_bytes = f.read()
 
         gender = "female" if query.data == "female" else "male"
-        prompt = f"Return an image of a {gender} model wearing this clothing. High resolution fashion photo."
+        prompt = f"A professional studio photo of a {gender} model wearing the exact clothing from this image."
 
-        # Используем Gemini 3 Flash Preview из твоего списка
-        # Мы запрашиваем IMAGE в модальностях
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(text=prompt)
-            ],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"]
-            )
+        # --- ТВОЙ КОД ИЗ СТУДИИ ---
+        model = "gemini-2.5-flash-image"
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    types.Part.from_text(text=prompt),
+                ],
+            ),
+        ]
+        generate_content_config = types.GenerateContentConfig(
+            response_modalities=["IMAGE", "TEXT"],
         )
 
         image_data = None
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    image_data = part.inline_data.data
-                    break
+        # Используем стриминг, как в твоем примере
+        for chunk in client.models.generate_content_stream(
+            model=model,
+            contents=contents,
+            config=generate_content_config,
+        ):
+            if chunk.parts is None:
+                continue
+            
+            # Логика сохранения из твоего примера
+            if chunk.parts[0].inline_data and chunk.parts[0].inline_data.data:
+                image_data = chunk.parts[0].inline_data.data
+                # Как только получили первый кусок с данными картинки — выходим
+                break 
         
         if image_data:
-            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data), caption="Успех! (Gemini 3)")
+            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data), caption="Готово! ✨")
         else:
-            await context.bot.send_message(chat_id, "Модель не смогла создать картинку без Billing-аккаунта.")
+            await context.bot.send_message(chat_id, "Модель вернула текст, но не картинку. Попробуй другое фото.")
 
     except Exception as e:
-        print(traceback.format_exc())
-        await context.bot.send_message(chat_id, f"Ошибка: {str(e)[:100]}")
+        print(f"Критическая ошибка:\n{traceback.format_exc()}")
+        err_msg = str(e)
+        if "429" in err_msg:
+            await context.bot.send_message(chat_id, "Превышен лимит (Free Tier). Подожди 1 минуту.")
+        else:
+            await context.bot.send_message(chat_id, f"Ошибка: {err_msg[:100]}")
+    
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
             os.remove(user_sessions[chat_id])
