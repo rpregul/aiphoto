@@ -2,7 +2,7 @@ import os
 import io
 import traceback
 from google import genai
-from google.genai import types
+# Мы будем передавать настройки словарями, чтобы избежать ошибок AttributeError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -53,31 +53,30 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(garment_path, "rb") as f:
             image_bytes = f.read()
 
-        model_desc = "female model" if gender == "female" else "male model"
+        model_desc = "female fashion model" if gender == "female" else "male fashion model"
         
-        # Промпт для генерации изображения
-        prompt = f"Create a professional fashion photo. A {model_desc} is wearing the exact clothing from this reference image. High quality, studio lighting."
+        # Инструкция для модели (Nano Banana)
+        prompt = f"Professional fashion photography. A {model_desc} is wearing the exact clothing item from this reference image. High quality, realistic lighting, 8k resolution."
 
-        # Используем Gemini 2.0 Flash (актуальный движок для nano banana генерации)
+        # Используем универсальный вызов через словарь config, чтобы избежать AttributeError
         response = client.models.generate_content(
             model='gemini-2.0-flash',
             contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+                {'mime_type': 'image/jpeg', 'data': image_bytes},
                 prompt
             ],
-            config=types.GenerateContentConfig(
-                # Включаем генерацию изображений внутри модели
-                image_generation_config=types.ImageGenerationConfig(
-                    number_of_images=1,
-                    aspect_ratio="3:4"
-                )
-            )
+            config={
+                'image_generation_config': {
+                    'number_of_images': 1,
+                    'aspect_ratio': "3:4"
+                }
+            }
         )
 
         image_sent = False
         if response.candidates:
             for part in response.candidates[0].content.parts:
-                # Если модель вернула именно сгенерированные байты картинки
+                # В новом SDK данные изображения приходят в inline_data.data
                 if part.inline_data:
                     img_io = io.BytesIO(part.inline_data.data)
                     img_io.name = 'result.png'
@@ -86,12 +85,13 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
         
         if not image_sent:
-            await context.bot.send_message(chat_id, "ИИ ответил текстом вместо картинки. Попробуйте другое фото.")
+            await context.bot.send_message(chat_id, "ИИ не смог сгенерировать картинку (возможно, сработал фильтр безопасности). Попробуйте другое фото.")
 
     except Exception as e:
         print(traceback.format_exc())
         await context.bot.send_message(chat_id, f"Ошибка API: {str(e)}")
     finally:
+        # Чистим временные файлы
         if chat_id in user_sessions:
             if os.path.exists(user_sessions[chat_id]):
                 os.remove(user_sessions[chat_id])
