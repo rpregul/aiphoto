@@ -1,7 +1,6 @@
 import os
 import io
 import requests
-import traceback
 from google import genai
 from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,18 +16,18 @@ client = genai.Client(
     http_options={'api_version': 'v1beta', 'base_url': f"https://{PROXY_URL}"}
 )
 
-# Список моделей для проверки (от новых к старым)
+# Актуальные ID моделей на февраль 2026
 MODELS_TO_TRY = [
-    "gemini-3-flash-thinking-preview", 
-    "gemini-2.0-flash-lite-preview-09-2025",
-    "gemini-1.5-flash-8b",
-    "gemini-1.5-flash"
+    "gemini-3-flash",      # Самая новая
+    "gemini-2.5-flash",    # Текущий стандарт
+    "gemini-2.5-flash-lite", # Эконом-вариант
+    "gemini-2.0-flash"     # Стабильная классика
 ]
 
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Карусель моделей запущена! Пришли фото для анализа.")
+    await update.message.reply_text("🚀 Бот обновлен! Модели актуализированы. Пришли фото.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
@@ -47,7 +46,7 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     gender = "female" if query.data == "female" else "male"
     
-    await query.edit_message_text("⏳ Подбираю свободную модель Gemini...")
+    await query.edit_message_text("⏳ Перебираю доступные нейросети Google...")
 
     garment_path = user_sessions.get(chat_id)
     if not garment_path: return
@@ -56,47 +55,46 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_bytes = f.read()
 
     ai_prompt = None
+    success_model = None
     
-    # КАРУСЕЛЬ: Пробуем модели по очереди
+    # КАРУСЕЛЬ: Пробуем только живые модели
     for model_name in MODELS_TO_TRY:
         try:
-            print(f"Пробую модель: {model_name}")
-            
-            # Настройка для Thinking моделей (если модель поддерживает мысли)
-            config = None
-            if "thinking" in model_name:
-                config = types.GenerateContentConfig(thinking_config=types.ThinkingConfig(include_thoughts=True))
-
+            print(f"Попытка запроса к: {model_name}")
             response = client.models.generate_content(
                 model=model_name,
                 contents=[
                     types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    f"Describe this clothing item. Create a text-to-image prompt for a {gender} model wearing this. ONLY English prompt."
-                ],
-                config=config
+                    f"Create a high-fashion prompt for a {gender} model wearing this. Result only in English."
+                ]
             )
             
             if response.text:
                 ai_prompt = response.text
-                print(f"✅ Успех с моделью {model_name}")
-                break # Выходим из цикла, если получили ответ
+                success_model = model_name
+                break 
                 
         except Exception as e:
-            print(f"❌ Модель {model_name} выдала ошибку: {str(e)[:50]}")
-            continue # Пробуем следующую
+            err = str(e)
+            print(f"❌ {model_name} недоступна: {err[:50]}")
+            continue 
 
     if not ai_prompt:
-        await query.message.reply_text("Все модели Google сейчас перегружены (429). Попробуй через 5 минут.")
+        await query.message.reply_text("❌ Google отклонил все запросы (429/404). Попробуй позже.")
         return
 
-    # ОТРИСОВКА (Pollinations всегда работает)
-    image_url = f"https://image.pollinations.ai/prompt/{ai_prompt.replace(' ', '%20')}?width=1024&height=1280&nologo=true"
+    # ОТРИСОВКА
+    image_gen_url = f"https://image.pollinations.ai/prompt/{ai_prompt.replace(' ', '%20')}?width=1024&height=1280&nologo=true"
     
     try:
-        img_res = requests.get(image_url, timeout=30)
-        await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(img_res.content), caption=f"Готово! (Использована модель: {model_name})")
+        img_res = requests.get(image_gen_url, timeout=30)
+        await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(img_res.content), 
+                                     caption=f"✅ Готово!\nМодель: {success_model}")
     except:
-        await query.message.reply_text("Ошибка генерации финальной картинки.")
+        await query.message.reply_text("Ошибка генерации изображения.")
+    finally:
+        if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
+            os.remove(user_sessions[chat_id])
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
