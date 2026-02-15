@@ -1,6 +1,8 @@
 import os
 import io
+import time
 import requests
+import traceback
 from google import genai
 from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,23 +13,23 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PROXY_URL = "aiphoto.plotnikov-csh.workers.dev" 
 
+# Инициализируем клиент
 client = genai.Client(
     api_key=GOOGLE_API_KEY,
     http_options={'api_version': 'v1beta', 'base_url': f"https://{PROXY_URL}"}
 )
 
-# Актуальные ID моделей на февраль 2026
+# Список моделей с ОБЯЗАТЕЛЬНЫМ префиксом models/
 MODELS_TO_TRY = [
-    "gemini-3-flash",      # Самая новая
-    "gemini-2.5-flash",    # Текущий стандарт
-    "gemini-2.5-flash-lite", # Эконом-вариант
-    "gemini-2.0-flash"     # Стабильная классика
+    "models/gemini-2.0-flash", 
+    "models/gemini-1.5-flash",
+    "models/gemini-1.5-flash-8b"
 ]
 
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 Бот обновлен! Модели актуализированы. Пришли фото.")
+    await update.message.reply_text("🚀 Бот обновлен (v3.0). Теперь с правильной адресацией моделей. Пришли фото!")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
@@ -38,7 +40,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
                 [InlineKeyboardButton("Мужская модель", callback_data="male")]]
-    await update.message.reply_text("Выбери пол:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Выбери пол модели:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -46,7 +48,7 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     gender = "female" if query.data == "female" else "male"
     
-    await query.edit_message_text("⏳ Перебираю доступные нейросети Google...")
+    await query.edit_message_text(f"⏳ Пробую достучаться до моделей Google...")
 
     garment_path = user_sessions.get(chat_id)
     if not garment_path: return
@@ -55,50 +57,57 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_bytes = f.read()
 
     ai_prompt = None
-    success_model = None
+    last_error = ""
     
-    # КАРУСЕЛЬ: Пробуем только живые модели
-    for model_name in MODELS_TO_TRY:
+    # ПЕРЕБОР МОДЕЛЕЙ
+    for model_id in MODELS_TO_TRY:
         try:
-            print(f"Попытка запроса к: {model_name}")
+            print(f"Запрос к {model_id}...")
             response = client.models.generate_content(
-                model=model_name,
+                model=model_id,
                 contents=[
                     types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    f"Create a high-fashion prompt for a {gender} model wearing this. Result only in English."
+                    f"Describe this clothing. Generate a short English prompt for a {gender} model wearing this. Prompt only."
                 ]
             )
             
             if response.text:
                 ai_prompt = response.text
-                success_model = model_name
-                break 
-                
+                print(f"✅ Успех с {model_id}")
+                break
         except Exception as e:
-            err = str(e)
-            print(f"❌ {model_name} недоступна: {err[:50]}")
-            continue 
+            last_error = str(e)
+            print(f"❌ Ошибка {model_id}: {last_error[:50]}")
+            continue
 
     if not ai_prompt:
-        await query.message.reply_text("❌ Google отклонил все запросы (429/404). Попробуй позже.")
+        await query.message.reply_text(f"Все модели отказали.\nПоследняя ошибка: {last_error[:100]}")
         return
 
-    # ОТРИСОВКА
-    image_gen_url = f"https://image.pollinations.ai/prompt/{ai_prompt.replace(' ', '%20')}?width=1024&height=1280&nologo=true"
-    
+    # ГЕНЕРАЦИЯ КАРТИНКИ
     try:
-        img_res = requests.get(image_gen_url, timeout=30)
-        await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(img_res.content), 
-                                     caption=f"✅ Готово!\nМодель: {success_model}")
-    except:
-        await query.message.reply_text("Ошибка генерации изображения.")
+        # Очистка промпта от лишних символов
+        clean_prompt = ai_prompt.strip().replace("\n", " ").replace('"', '')
+        image_url = f"https://image.pollinations.ai/prompt/{clean_prompt.replace(' ', '%20')}?width=1024&height=1280&nologo=true"
+        
+        img_res = requests.get(image_url, timeout=30)
+        if img_res.status_code == 200:
+            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(img_res.content), caption="✨ Образ готов!")
+        else:
+            await query.message.reply_text("Ошибка отрисовщика Pollinations.")
+    except Exception as e:
+        await query.message.reply_text(f"Ошибка при создании картинки: {str(e)[:50]}")
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
             os.remove(user_sessions[chat_id])
 
 if __name__ == "__main__":
+    # Небольшая задержка перед стартом для Railway
+    time.sleep(2)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_choice))
+    
+    print("Бот запущен...")
     app.run_polling(drop_pending_updates=True)
