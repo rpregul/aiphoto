@@ -1,20 +1,19 @@
 import os
-import google.generativeai as genai
+import io
+import asyncio
+import traceback
+from PIL import Image
+from google import genai
+from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from PIL import Image
-import io
-import traceback
 
-# Настройка ключей
+# Настройка
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-genai.configure(api_key=GOOGLE_API_KEY)
-
-# Для генерации изображений используется Imagen
-# Важно: В некоторых регионах модель называется 'imagen-3.0-generate-001'
-imagen = genai.ImageGenerationModel("imagen-3.0-generate-001")
+# Инициализация нового клиента Gemini
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
 FEMALE_MODEL_PATH = "models/female.jpg"
 MALE_MODEL_PATH = "models/male.jpg"
@@ -22,7 +21,7 @@ MALE_MODEL_PATH = "models/male.jpg"
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Пришли мне фото одежды (желательно на однотонном фоне), и я примерю её на модель.")
+    await update.message.reply_text("Пришли фото одежды, и я примерю её на модель!")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -30,71 +29,56 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await photo.get_file()
         photo_path = f"garment_{update.effective_chat.id}.jpg"
         await file.download_to_drive(photo_path)
-
+        
         user_sessions[update.effective_chat.id] = photo_path
 
-        keyboard = [
-            [InlineKeyboardButton("Женская модель", callback_data="female")],
-            [InlineKeyboardButton("Мужская модель", callback_data="male")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("На кого надеваем?", reply_markup=reply_markup)
-
-    except Exception as e:
-        await update.message.reply_text("Ошибка при загрузке фото.")
-        print(traceback.format_exc())
+        keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
+                    [InlineKeyboardButton("Мужская модель", callback_data="male")]]
+        await update.message.reply_text("На кого надеваем?", reply_markup=InlineKeyboardMarkup(keyboard))
+    except:
+        await update.message.reply_text("Ошибка загрузки.")
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
+    
     gender = query.data
     chat_id = query.message.chat.id
-
-    await query.edit_message_text("🎨 Колдую над образом... Это займет около 10-20 секунд.")
+    await query.edit_message_text("⏳ Генерирую... Пожалуйста, подождите.")
 
     try:
         garment_path = user_sessions.get(chat_id)
-        if not garment_path:
-            await context.bot.send_message(chat_id, "Сначала отправь фото одежды.")
-            return
-
-        model_type = "a professional female fashion model" if gender == "female" else "a professional male fashion model"
+        model_type = "female fashion model" if gender == "female" else "male fashion model"
         
-        # Читаем фото одежды для контекста (если API поддерживает Image-to-Image в вашем регионе)
-        # В базовом варианте Imagen 3 лучше всего работает через детальное описание.
-        # Для бесплатного MVP мы передаем описание того, что на фото.
+        # Загружаем фото одежды для анализа (через новый метод)
+        raw_image = Image.open(garment_path)
         
-        prompt = f"A high-quality fashion photography of {model_type} wearing the exact clothing item from the provided reference. Realistic fabric texture, studio lighting, highly detailed, 8k resolution."
-
-        # Вызов генерации
-        # Примечание: Imagen в Free Tier может иметь ограничения на передачу исходных картинок (Image-to-Image)
-        # Если ваша задача именно "перенос", используйте параметр 'input_file' если он доступен
-        response = imagen.generate_images(
+        # Формируем запрос для Imagen 3 через новый SDK
+        prompt = f"Professional studio photo of a {model_type} wearing the clothing from the reference image. High detail, realistic fabric."
+        
+        # Вызов генерации (в новом SDK это делается так)
+        response = client.models.generate_images(
+            model='imagen-3.0-generate-001',
             prompt=prompt,
-            number_of_images=1,
-            # В ряде версий SDK можно передать опорное изображение:
-            # reference_images=[Image.open(garment_path)] 
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                include_rai_reasoning=True
+            )
         )
 
-        if response.images:
-            for img in response.images:
-                # Конвертируем PIL Image в байты для отправки в Telegram
-                bio = io.BytesIO()
-                bio.name = 'result.png'
-                img._pil_image.save(bio, 'PNG')
-                bio.seek(0)
-                
-                await context.bot.send_photo(chat_id=chat_id, photo=bio, caption="Готово! Как вам?")
+        if response.generated_images:
+            img_data = response.generated_images[0].image.image_bytes
+            bio = io.BytesIO(img_data)
+            bio.name = 'out.png'
+            await context.bot.send_photo(chat_id=chat_id, photo=bio, caption="Готово!")
         else:
-            await context.bot.send_message(chat_id, "Не удалось сгенерировать образ. Возможно, сработал фильтр безопасности.")
+            await context.bot.send_message(chat_id, "Изображение не создано (возможно, фильтр контента).")
 
     except Exception as e:
-        await context.bot.send_message(chat_id, f"Ошибка генерации: {str(e)}")
         print(traceback.format_exc())
+        await context.bot.send_message(chat_id, f"Ошибка: {str(e)}")
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 app.add_handler(CallbackQueryHandler(handle_choice))
