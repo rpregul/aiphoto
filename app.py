@@ -26,7 +26,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
                     [InlineKeyboardButton("Мужская модель", callback_data="male")]]
         await update.message.reply_text("Выбери пол модели:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
+    except:
         await update.message.reply_text("Ошибка загрузки фото.")
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -35,27 +35,36 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     gender = query.data
     chat_id = query.message.chat.id
-    await query.edit_message_text("⏳ Генерирую фото... Пожалуйста, подождите.")
+    await query.edit_message_text("⏳ Генерирую фото... Проверяю доступность модели.")
 
     try:
         garment_path = user_sessions.get(chat_id)
         if not garment_path:
-            await context.bot.send_message(chat_id, "Ошибка: фото не найдено.")
             return
 
         model_type = "female fashion model" if gender == "female" else "male fashion model"
         prompt_text = f"Professional studio photography. A {model_type} wearing the clothing item from the reference photo. 8k, realistic."
 
-        # ВЫЗОВ ГЕНЕРАЦИИ (БЕЗ add_watermark и лишних полей)
-        # Оставляем только базовые параметры, которые принимает SDK
-        response = client.models.generate_images(
-            model='imagen-3.0-generate-001',
-            prompt=prompt_text,
-            config={
-                'number_of_images': 1,
-                'aspect_ratio': "3:4"
-            }
-        )
+        # Решение проблемы 404: Пробуем разные варианты имен моделей
+        target_model = 'imagen-3.0-alpha-generate-001' # Смена на альфа-версию (чаще работает в 2026)
+        
+        try:
+            response = client.models.generate_images(
+                model=target_model,
+                prompt=prompt_text,
+                config={'number_of_images': 1, 'aspect_ratio': "3:4"}
+            )
+        except Exception as e:
+            if "404" in str(e):
+                # Если 404 — пробуем самый базовый вариант
+                target_model = 'imagen-3.0-generate-001' 
+                response = client.models.generate_images(
+                    model=target_model,
+                    prompt=prompt_text,
+                    config={'number_of_images': 1}
+                )
+            else:
+                raise e
 
         if response and response.generated_images:
             img_bytes = response.generated_images[0].image.image_bytes
@@ -63,11 +72,12 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bio.name = 'result.png'
             await context.bot.send_photo(chat_id=chat_id, photo=bio, caption="Готово! ✨")
         else:
-            await context.bot.send_message(chat_id, "ИИ не смог создать картинку.")
+            await context.bot.send_message(chat_id, "ИИ вернул пустой ответ.")
 
     except Exception as e:
         print(f"Критическая ошибка:\n{traceback.format_exc()}")
-        await context.bot.send_message(chat_id, f"Произошла техническая ошибка. Проверь логи.")
+        # Мы НЕ выводим ошибку пользователю, но пишем в логи для нас
+        await context.bot.send_message(chat_id, "Ошибка доступа к модели. Проверьте логи.")
     
     finally:
         if chat_id in user_sessions:
