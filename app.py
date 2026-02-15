@@ -10,29 +10,22 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Инициализация клиента Gemini
 client = genai.Client(api_key=GOOGLE_API_KEY)
-
-# Временное хранилище путей к фото
 user_sessions = {}
 
-# 1. КОМАНДА ПРОВЕРКИ ДОСТУПНЫХ МОДЕЛЕЙ
+# Исправленная диагностика
 async def check_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         models_list = client.models.list()
-        # Собираем только те, что поддерживают генерацию контента
-        available = [m.name for m in models_list if 'generateContent' in m.supported_methods]
-        
-        text = "✅ Доступные вам модели:\n\n" + "\n".join(available)
+        # В SDK 2026 года названия моделей лежат в .name
+        available = [m.name for m in models_list]
+        text = "✅ Список всех ID моделей:\n\n" + "\n".join(available)
         await update.message.reply_text(text)
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при получении списка: {e}")
+        await update.message.reply_text(f"❌ Ошибка списка: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Привет! Пришли фото одежды для примерки.\n"
-        "Используй /check, чтобы увидеть список доступных моделей ИИ."
-    )
+    await update.message.reply_text("Бот запущен. Пришли фото одежды. Команда проверки: /check")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -41,80 +34,65 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = f"garment_{update.effective_chat.id}.jpg"
         await file.download_to_drive(file_path)
         user_sessions[update.effective_chat.id] = file_path
-
+        
         keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
                     [InlineKeyboardButton("Мужская модель", callback_data="male")]]
-        await update.message.reply_text("Выбери пол модели:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Пол модели:", reply_markup=InlineKeyboardMarkup(keyboard))
     except:
-        await update.message.reply_text("Ошибка при сохранении фото.")
+        await update.message.reply_text("Ошибка загрузки фото.")
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
-    
-    await query.edit_message_text("⏳ Генерирую образ (Nano Banana)...")
+    await query.edit_message_text("⏳ Генерирую через Gemini 2.0 Flash Exp...")
 
     try:
         garment_path = user_sessions.get(chat_id)
-        if not garment_path:
-            return
+        if not garment_path: return
 
         with open(garment_path, "rb") as f:
             image_bytes = f.read()
 
         gender = "female" if query.data == "female" else "male"
-        prompt = f"Professional studio photography. A {gender} fashion model wearing the exact clothing from this reference image. 8k, realistic."
+        prompt = f"Fashion photography. A {gender} model wearing this item. 8k, studio."
 
-        # ИСПОЛЬЗУЕМ СТРУКТУРУ ИЗ GOOGLE AI STUDIO
+        # МЕНЯЕМ МОДЕЛЬ НА 2.0 FLASH EXPERIMENTAL
+        # У нее сейчас самые открытые лимиты для Free Tier
         response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
+            model="gemini-2.0-flash-exp", 
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 types.Part.from_text(text=prompt)
             ],
             config=types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"]
+                response_modalities=["IMAGE"]
             )
         )
 
-        image_sent = False
+        image_data = None
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.inline_data:
-                    img_io = io.BytesIO(part.inline_data.data)
-                    img_io.name = 'result.png'
-                    await context.bot.send_photo(chat_id=chat_id, photo=img_io, caption="Готово! ✨")
-                    image_sent = True
+                    image_data = part.inline_data.data
                     break
         
-        if not image_sent:
-            await context.bot.send_message(chat_id, "ИИ не выдал изображение. Возможно, сработал фильтр контента.")
+        if image_data:
+            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data))
+        else:
+            await context.bot.send_message(chat_id, "ИИ не выдал картинку. Попробуй /check чтобы увидеть доступные модели.")
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"Критическая ошибка:\n{traceback.format_exc()}")
-        
-        if "404" in error_msg:
-            await context.bot.send_message(chat_id, "ОШИБКА 404: Модель не найдена. Напиши /check и пришли список мне.")
-        elif "429" in error_msg:
-            await context.bot.send_message(chat_id, "ОШИБКА 429: Лимит исчерпан. Подожди 1-2 минуты.")
-        else:
-            await context.bot.send_message(chat_id, f"Произошла ошибка: {error_msg[:100]}")
-    
+        print(traceback.format_exc())
+        await context.bot.send_message(chat_id, f"Ошибка: {str(e)[:100]}")
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
             os.remove(user_sessions[chat_id])
 
-# --- ЗАПУСК БОТА ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("check", check_models))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_choice))
-
-    print("Бот запускается...")
-    # drop_pending_updates=True помогает при ошибках Conflict (Повтор!)
     app.run_polling(drop_pending_updates=True)
