@@ -11,7 +11,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # СЮДА ВСТАВЬ СВОЙ АДРЕС ИЗ CLOUDFLARE (БЕЗ https:// и БЕЗ слэша в конце)
-PROXY_URL = "my-gemini-proxy.твой-ник.workers.dev" 
+PROXY_URL = "aiphoto.plotnikov-csh.workers.dev" 
 
 # Инициализируем клиент с подменой базового URL
 client = genai.Client(
