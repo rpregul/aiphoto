@@ -13,8 +13,8 @@ genai.configure(api_key=GOOGLE_API_KEY)
 
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-FEMALE_MODEL_PATH = "models/female.jpg"
-MALE_MODEL_PATH = "models/male.jpg"
+FEMALE_MODEL_PATH = "models/female.JPG"
+MALE_MODEL_PATH = "models/male.JPG"
 
 user_sessions = {}
 
