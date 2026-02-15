@@ -1,7 +1,9 @@
 import os
 import io
 import traceback
+import mimetypes
 from google import genai
+from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -13,7 +15,7 @@ client = genai.Client(api_key=GOOGLE_API_KEY)
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Пришли фото одежды, и я создам фото с моделью.")
+    await update.message.reply_text("👋 Привет! Пришли фото одежды, и я примерю её на модель (Nano Banana).")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -35,49 +37,58 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     gender = query.data
     chat_id = query.message.chat.id
-    await query.edit_message_text("⏳ Генерирую фото... Проверяю доступность модели.")
+    await query.edit_message_text("⏳ Генерирую образ через Gemini 2.5 Pro Image...")
 
     try:
         garment_path = user_sessions.get(chat_id)
         if not garment_path:
             return
 
+        with open(garment_path, "rb") as f:
+            image_bytes = f.read()
+
         model_type = "female fashion model" if gender == "female" else "male fashion model"
-        prompt_text = f"Professional studio photography. A {model_type} wearing the clothing item from the reference photo. 8k, realistic."
+        prompt = f"Professional fashion photography. A {model_type} wearing the exact clothing from this reference image. 8k, realistic."
 
-        # Решение проблемы 404: Пробуем разные варианты имен моделей
-        target_model = 'imagen-3.0-alpha-generate-001' # Смена на альфа-версию (чаще работает в 2026)
+        # ИСПОЛЬЗУЕМ СТРУКТУРУ ИЗ ГУГЛ СТУДИИ
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    types.Part.from_text(text=prompt),
+                ],
+            ),
+        ]
         
-        try:
-            response = client.models.generate_images(
-                model=target_model,
-                prompt=prompt_text,
-                config={'number_of_images': 1, 'aspect_ratio': "3:4"}
-            )
-        except Exception as e:
-            if "404" in str(e):
-                # Если 404 — пробуем самый базовый вариант
-                target_model = 'imagen-3.0-generate-001' 
-                response = client.models.generate_images(
-                    model=target_model,
-                    prompt=prompt_text,
-                    config={'number_of_images': 1}
-                )
-            else:
-                raise e
+        generate_content_config = types.GenerateContentConfig(
+            response_modalities=["IMAGE", "TEXT"],
+        )
 
-        if response and response.generated_images:
-            img_bytes = response.generated_images[0].image.image_bytes
-            bio = io.BytesIO(img_bytes)
+        image_data = None
+        
+        # Запускаем стрим, как в примере
+        for chunk in client.models.generate_content_stream(
+            model="gemini-2.5-flash-image",
+            contents=contents,
+            config=generate_content_config,
+        ):
+            if chunk.parts:
+                for part in chunk.parts:
+                    if part.inline_data and part.inline_data.data:
+                        image_data = part.inline_data.data
+                        break
+        
+        if image_data:
+            bio = io.BytesIO(image_data)
             bio.name = 'result.png'
-            await context.bot.send_photo(chat_id=chat_id, photo=bio, caption="Готово! ✨")
+            await context.bot.send_photo(chat_id=chat_id, photo=bio, caption="Ваш результат готов! ✨")
         else:
-            await context.bot.send_message(chat_id, "ИИ вернул пустой ответ.")
+            await context.bot.send_message(chat_id, "ИИ не прислал изображение. Попробуйте другое фото.")
 
     except Exception as e:
         print(f"Критическая ошибка:\n{traceback.format_exc()}")
-        # Мы НЕ выводим ошибку пользователю, но пишем в логи для нас
-        await context.bot.send_message(chat_id, "Ошибка доступа к модели. Проверьте логи.")
+        await context.bot.send_message(chat_id, "Произошла ошибка при генерации.")
     
     finally:
         if chat_id in user_sessions:
@@ -85,6 +96,7 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(user_sessions[chat_id])
             del user_sessions[chat_id]
 
+# --- ЗАПУСК ---
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
