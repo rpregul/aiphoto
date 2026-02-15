@@ -2,7 +2,6 @@ import os
 import io
 import traceback
 from google import genai
-from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -13,19 +12,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 client = genai.Client(api_key=GOOGLE_API_KEY)
 user_sessions = {}
 
-# Исправленная диагностика
-async def check_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        models_list = client.models.list()
-        # В SDK 2026 года названия моделей лежат в .name
-        available = [m.name for m in models_list]
-        text = "✅ Список всех ID моделей:\n\n" + "\n".join(available)
-        await update.message.reply_text(text)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка списка: {e}")
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущен. Пришли фото одежды. Команда проверки: /check")
+    await update.message.reply_text("✅ Бот готов! Пришли фото одежды для генерации образа.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -37,7 +25,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
                     [InlineKeyboardButton("Мужская модель", callback_data="male")]]
-        await update.message.reply_text("Пол модели:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Выбери пол:", reply_markup=InlineKeyboardMarkup(keyboard))
     except:
         await update.message.reply_text("Ошибка загрузки фото.")
 
@@ -45,45 +33,40 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
-    await query.edit_message_text("⏳ Генерирую через Gemini 2.0 Flash Exp...")
+    await query.edit_message_text("⏳ Генерирую фото через Imagen 4.0...")
 
     try:
         garment_path = user_sessions.get(chat_id)
         if not garment_path: return
 
-        with open(garment_path, "rb") as f:
-            image_bytes = f.read()
-
         gender = "female" if query.data == "female" else "male"
-        prompt = f"Fashion photography. A {gender} model wearing this item. 8k, studio."
+        # Промпт адаптирован под Imagen 4.0
+        prompt_text = f"A professional high-fashion studio photo of a {gender} model wearing the clothing item shown in the reference. Photorealistic, 8k resolution, cinematic lighting."
 
-        # МЕНЯЕМ МОДЕЛЬ НА 2.0 FLASH EXPERIMENTAL
-        # У нее сейчас самые открытые лимиты для Free Tier
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-exp", 
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(text=prompt)
-            ],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"]
-            )
+        # ИСПОЛЬЗУЕМ МОДЕЛЬ ИЗ ТВОЕГО СПИСКА
+        # Метод generate_images — единственный верный для моделей серии imagen
+        response = client.models.generate_images(
+            model='imagen-4.0-generate-001',
+            prompt=prompt_text,
+            config={
+                'number_of_images': 1,
+                'aspect_ratio': "3:4",
+                'safety_filter_level': "BLOCK_ONLY_HIGH" 
+            }
         )
 
-        image_data = None
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    image_data = part.inline_data.data
-                    break
-        
-        if image_data:
-            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data))
+        if response and response.generated_images:
+            img_bytes = response.generated_images[0].image.image_bytes
+            await context.bot.send_photo(
+                chat_id=chat_id, 
+                photo=io.BytesIO(img_bytes), 
+                caption="Готово! ✨"
+            )
         else:
-            await context.bot.send_message(chat_id, "ИИ не выдал картинку. Попробуй /check чтобы увидеть доступные модели.")
+            await context.bot.send_message(chat_id, "ИИ не смог сгенерировать изображение.")
 
     except Exception as e:
-        print(traceback.format_exc())
+        print(f"Критическая ошибка:\n{traceback.format_exc()}")
         await context.bot.send_message(chat_id, f"Ошибка: {str(e)[:100]}")
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
@@ -92,7 +75,8 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("check", check_models))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_choice))
+
+    print("Бот запускается на Imagen 4.0...")
     app.run_polling(drop_pending_updates=True)
