@@ -10,11 +10,11 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# ВСТАВЬ СЮДА СВОЙ АДРЕС БЕЗ https://
-# Пример: PROXY_URL = "my-proxy.account.workers.dev"
+# !!! ВСТАВЬ СВОЙ АДРЕС СЮДА !!!
+# Пример: PROXY_URL = "aiphoto.plotnikov-csh.workers.dev"
 PROXY_URL = "aiphoto.plotnikov-csh.workers.dev" 
 
-# Инициализация клиента с прокси (как в статье с Хабра)
+# Инициализация клиента с прокси
 client = genai.Client(
     api_key=GOOGLE_API_KEY,
     http_options={'api_version': 'v1beta', 'base_url': f"https://{PROXY_URL}"}
@@ -23,7 +23,7 @@ client = genai.Client(
 user_sessions = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот запущен через Cloudflare Proxy! Пришли фото одежды.")
+    await update.message.reply_text("👋 Бот запущен через прокси! Пришли фото одежды.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -35,16 +35,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = [[InlineKeyboardButton("Женская модель", callback_data="female")],
                     [InlineKeyboardButton("Мужская модель", callback_data="male")]]
-        await update.message.reply_text("Выбери пол:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Выбери пол модели:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
-        await update.message.reply_text("Ошибка при получении фото.")
+        await update.message.reply_text("Ошибка загрузки фото.")
 
 async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
     
-    await query.edit_message_text("⏳ Генерирую через прокси...")
+    await query.edit_message_text("⏳ Генерирую образ через Gemini 3 Flash...")
 
     try:
         garment_path = user_sessions.get(chat_id)
@@ -54,11 +54,11 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_bytes = f.read()
 
         gender = "female" if query.data == "female" else "male"
-        prompt = f"Professional studio photo of a {gender} model wearing the clothing from this image."
+        prompt = f"Please generate and return a high-quality fashion photo of a {gender} model wearing the exact clothing from this image. Professional lighting."
 
-        # ТВОЙ КОД ИЗ СТУДИИ
+        # Используем Gemini 3 Flash Preview (она самая лояльная к лимитам)
         response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
+            model="gemini-3-flash-preview",
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 types.Part.from_text(text=prompt),
@@ -76,19 +76,19 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
         
         if image_data:
-            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data), caption="Готово! ✨")
+            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_data), caption="Готово! 🚀")
         else:
-            await context.bot.send_message(chat_id, "Картинка не пришла. Проверь Cloudflare Logs.")
+            reason = response.candidates[0].content.parts[0].text if response.candidates else "Ответа нет"
+            await context.bot.send_message(chat_id, f"ИИ выдал текст вместо фото: {reason[:150]}")
 
     except Exception as e:
         print(f"Критическая ошибка:\n{traceback.format_exc()}")
-        await context.bot.send_message(chat_id, f"Ошибка прокси: {str(e)[:100]}")
+        await context.bot.send_message(chat_id, f"Ошибка: {str(e)[:100]}")
     
     finally:
         if chat_id in user_sessions and os.path.exists(user_sessions[chat_id]):
             os.remove(user_sessions[chat_id])
 
-# --- ЗАПУСК ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
